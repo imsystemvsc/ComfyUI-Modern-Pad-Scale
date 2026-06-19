@@ -16,7 +16,7 @@ const DEFAULT_STATE = {
     exact_width: 1024, exact_height: 1024
 };
 
-// Safe CSS (No layout-breaking sweepers)
+// Inject CSS for the Modern Dashboard
 const style = document.createElement("style");
 style.textContent = `
     .mps-root { background: #1e1e24; border: 2px dashed transparent; border-radius: 8px; padding: 12px; font-family: sans-serif; color: #e2e8f0; display: flex; flex-direction: column; gap: 10px; width: 100%; box-sizing: border-box; transition: background 0.2s, border-color 0.2s; }
@@ -53,10 +53,8 @@ app.registerExtension({
                 let nativeImageWidget = null;
                 let stateWidget = null;
                 
-                // Hide any LiteGraph widgets drawn directly on the canvas
                 if (this.widgets) {
-                    for (let i = 0; i < this.widgets.length; i++) {
-                        let w = this.widgets[i];
+                    this.widgets.forEach(w => {
                         if (w.name === "image") nativeImageWidget = w;
                         if (w.name === "ModernState") stateWidget = w;
                         
@@ -64,7 +62,7 @@ app.registerExtension({
                             w.hidden = true;
                             w.computeSize = () => [0, -4];
                         }
-                    }
+                    });
                 }
 
                 const getState = () => {
@@ -221,7 +219,7 @@ app.registerExtension({
                     ctx.restore();
                     
                     let finalW=Math.round(totW), finalH=Math.round(totH);
-                    if (state.mode!=="Exact Pixels" && state.scaling_mode!=="No Scaling") {
+                    if (state.mode !== "Exact Pixels" && state.scaling_mode !== "No Scaling") {
                         let scale_factor = Math.sqrt((parseFloat(state.scale_to_megapixel)||1.0)*1024*1024 / (totW*totH));
                         finalW = Math.floor(totW*scale_factor) - (Math.floor(totW*scale_factor)%8);
                         finalH = Math.floor(totH*scale_factor) - (Math.floor(totH*scale_factor)%8);
@@ -254,34 +252,40 @@ app.registerExtension({
                 els.align.addEventListener("change", e => setState({aspect_alignment: e.target.value}));
                 els.color.addEventListener("change", e => setState({padding_style: e.target.value}));
                 els.scaling.addEventListener("change", e => setState({scaling_mode: e.target.value}));
-                els.mp.addEventListener("input", e => setState({scale_to_megapixel: e.target.value}));
-                els.padL.addEventListener("input", e => setState({manual_left: e.target.value}));
-                els.padT.addEventListener("input", e => setState({manual_top: e.target.value}));
-                els.padR.addEventListener("input", e => setState({manual_right: e.target.value}));
-                els.padB.addEventListener("input", e => setState({manual_bottom: e.target.value}));
-                els.exactW.addEventListener("input", e => setState({exact_width: e.target.value}));
-                els.exactH.addEventListener("input", e => setState({exact_height: e.target.value}));
-                els.maskGrow.addEventListener("input", e => setState({mask_grow: e.target.value}));
+                
+                els.mp.addEventListener("change", e => setState({scale_to_megapixel: e.target.value}));
+                els.padL.addEventListener("change", e => setState({manual_left: e.target.value}));
+                els.padT.addEventListener("change", e => setState({manual_top: e.target.value}));
+                els.padR.addEventListener("change", e => setState({manual_right: e.target.value}));
+                els.padB.addEventListener("change", e => setState({manual_bottom: e.target.value}));
+                els.exactW.addEventListener("change", e => setState({exact_width: e.target.value}));
+                els.exactH.addEventListener("change", e => setState({exact_height: e.target.value}));
+                els.maskGrow.addEventListener("change", e => setState({mask_grow: e.target.value}));
+                
                 els.flipH.addEventListener("click", () => setState({flip_h: !getState().flip_h}));
                 els.flipV.addEventListener("click", () => setState({flip_v: !getState().flip_v}));
                 els.invertMask.addEventListener("click", () => setState({invert_mask: !getState().invert_mask}));
                 els.rotL.addEventListener("click", () => { let r=getState().rotation; setState({rotation:(r-90+360)%360}); });
                 els.rotR.addEventListener("click", () => { let r=getState().rotation; setState({rotation:(r+90)%360}); });
 
+                // PERSISTENT FALLBACK: Instantly pull value data if normal loader metadata drops out on boot
+                const syncImageSource = () => {
+                    if (nativeImageWidget && nativeImageWidget.value) {
+                        if (currentImg.src !== `/view?filename=${encodeURIComponent(nativeImageWidget.value)}&type=input`) {
+                            currentImg = new Image();
+                            currentImg.onload = renderCanvas;
+                            currentImg.src = `/view?filename=${encodeURIComponent(nativeImageWidget.value)}&type=input`;
+                        }
+                    }
+                };
+
                 if (nativeImageWidget) {
                     const origCallback = nativeImageWidget.callback;
                     nativeImageWidget.callback = function () {
                         if (origCallback) origCallback.apply(this, arguments);
-                        if (nativeImageWidget.value) {
-                            currentImg = new Image();
-                            currentImg.onload = renderCanvas;
-                            currentImg.src = `/view?filename=${encodeURIComponent(nativeImageWidget.value)}&type=input&t=${Date.now()}`;
-                        }
+                        syncImageSource();
                     };
-                    if (nativeImageWidget.value) {
-                        currentImg.src = `/view?filename=${encodeURIComponent(nativeImageWidget.value)}&type=input&t=${Date.now()}`;
-                        currentImg.onload = renderCanvas;
-                    }
+                    syncImageSource();
                 }
 
                 const handleUpload = async (file) => {
@@ -293,8 +297,8 @@ app.registerExtension({
                         if (data.name) {
                             if (nativeImageWidget) nativeImageWidget.value = data.name;
                             currentImg = new Image();
-                            currentImg.src = `/view?filename=${encodeURIComponent(data.name)}&type=input&t=${Date.now()}`;
                             currentImg.onload = renderCanvas;
+                            currentImg.src = `/view?filename=${encodeURIComponent(data.name)}&type=input`;
                         }
                     } catch (err) { console.error("Upload failed", err); }
                 };
@@ -321,7 +325,10 @@ app.registerExtension({
 
                 node.size = [310, 580];
                 node.addDOMWidget("modern_pad_ui", "custom", root, { getValue: () => null, setValue: () => {}, getMinHeight: () => 580 });
-                setTimeout(updateUI, 500);
+                
+                // Continuous checker ensures canvas metrics kick back on if restored layout states race past DOM injections
+                setTimeout(() => { syncImageSource(); updateUI(); }, 250);
+                setTimeout(() => { syncImageSource(); updateUI(); }, 750);
                 return r;
             };
         }
