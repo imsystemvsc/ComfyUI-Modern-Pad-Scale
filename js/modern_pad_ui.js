@@ -13,13 +13,16 @@ const DEFAULT_STATE = {
     scaling_mode: "Megapixel Scaling",
     scale_to_megapixel: 1.0,
     manual_left: 0, manual_top: 0, manual_right: 0, manual_bottom: 0,
-    exact_width: 1024, exact_height: 1024
+    exact_width: 1024, exact_height: 1024,
+    crop_enabled: false,
+    crop_left: 0.0, crop_top: 0.0, crop_right: 1.0, crop_bottom: 1.0
 };
 
 // Inject CSS for the Modern Dashboard
 const style = document.createElement("style");
 style.textContent = `
     .mps-root { background: #1e1e24; border: 2px dashed transparent; border-radius: 8px; padding: 12px; font-family: sans-serif; color: #e2e8f0; display: flex; flex-direction: column; gap: 10px; width: 100%; box-sizing: border-box; transition: background 0.2s, border-color 0.2s; }
+    .mps-root:focus-within { border-color: #3b82f6; }
     .mps-dragover { background: #27272a !important; border-color: #3b82f6 !important; }
     .mps-btn { background: #3b82f6; border: none; border-radius: 4px; padding: 8px; color: white; cursor: pointer; font-weight: bold; text-align: center; transition: 0.1s; }
     .mps-btn:hover { background: #2563eb; }
@@ -32,7 +35,7 @@ style.textContent = `
     .mps-select:focus, .mps-input:focus { outline: none; border-color: #3b82f6; }
     .mps-preview-container { background: #131315; border: 1px solid #27272a; border-radius: 6px; height: 160px; position: relative; overflow: hidden; display: flex; justify-content: center; align-items: center;}
     .mps-preview-text { font-size: 11px; color: #a1a1aa; text-align: center; margin-top: -4px; margin-bottom: 4px; }
-    .mps-canvas { position: absolute; }
+    .mps-canvas { position: absolute; cursor: crosshair; }
     .mps-hidden { display: none !important; }
 `;
 document.head.appendChild(style);
@@ -57,7 +60,6 @@ app.registerExtension({
                     this.widgets.forEach(w => {
                         if (w.name === "image") nativeImageWidget = w;
                         if (w.name === "ModernState") stateWidget = w;
-                        
                         if (w.type !== "custom") {
                             w.hidden = true;
                             w.computeSize = () => [0, -4];
@@ -93,6 +95,7 @@ app.registerExtension({
 
                 const root = document.createElement("div");
                 root.className = "mps-root";
+                root.setAttribute("tabindex", "0");
                 root.innerHTML = `
                     <button class="mps-btn" id="mps-upload">Upload Image</button>
                     <input type="file" id="mps-file-input" accept="image/*" class="mps-hidden">
@@ -125,7 +128,7 @@ app.registerExtension({
                         <div><div class="mps-label">Height</div><input type="number" class="mps-input" id="mps-exact-h" value="1024"></div>
                     </div>
                     <div id="mps-color-box" class="mps-row">
-                        <div><div class="mps-label">Padding Color</div><select class="mps-select" id="mps-color"><option>Solid Black</option><option>Solid Green</option></select></div>
+                        <div><div class="mps-label">Padding Color</div><select class="mps-select" id="mps-color"><option>Solid Black</option><option>Solid Green</option><option>Latent Noise</option></select></div>
                     </div>
                     <div id="mps-scaling-row" class="mps-row">
                         <div><div class="mps-label">Scaling Mode</div><select class="mps-select" id="mps-scaling"><option>Megapixel Scaling</option><option>No Scaling</option></select></div>
@@ -134,6 +137,9 @@ app.registerExtension({
                     <div class="mps-row">
                         <div style="flex:0.5;"><div class="mps-label">Invert Mask</div><button class="mps-btn-outline" style="padding: 6px; font-size:12px;" id="mps-invert-mask">False</button></div>
                         <div><div class="mps-label">Grow/Shrink</div><input type="number" class="mps-input" id="mps-mask-grow" value="0"></div>
+                    </div>
+                    <div class="mps-row">
+                        <div><div class="mps-label">Interactive Crop Box</div><button class="mps-btn-outline" style="padding: 8px; font-size:12px;" id="mps-crop-enable">Disabled</button></div>
                     </div>
                 `;
 
@@ -151,10 +157,15 @@ app.registerExtension({
                     colorBox: root.querySelector("#mps-color-box"), color: root.querySelector("#mps-color"),
                     scalingRow: root.querySelector("#mps-scaling-row"), scaling: root.querySelector("#mps-scaling"),
                     mpBox: root.querySelector("#mps-mp-box"), mp: root.querySelector("#mps-mp"),
-                    invertMask: root.querySelector("#mps-invert-mask"), maskGrow: root.querySelector("#mps-mask-grow")
+                    invertMask: root.querySelector("#mps-invert-mask"), maskGrow: root.querySelector("#mps-mask-grow"),
+                    cropEnable: root.querySelector("#mps-crop-enable")
                 };
 
                 let currentImg = new Image();
+                let isDraggingCrop = false;
+                let activeHandle = null; 
+                let lastMouseX = 0, lastMouseY = 0;
+                let layoutContext = { imgX: 0, imgY: 0, imgW: 0, imgH: 0 };
 
                 const renderCanvas = () => {
                     if (!currentImg || !currentImg.naturalWidth) { els.dims.textContent = "Awaiting Image..."; return; }
@@ -162,6 +173,7 @@ app.registerExtension({
                     const ctx = els.canvas.getContext("2d");
                     const cw = 280; const ch = 150; els.canvas.width = cw; els.canvas.height = ch;
                     let rot = state.rotation;
+                    
                     let origW = currentImg.naturalWidth; let origH = currentImg.naturalHeight;
                     let effW = (rot === 90 || rot === 270) ? origH : origW; let effH = (rot === 90 || rot === 270) ? origW : origH;
                     let pL = 0, pT = 0, pR = 0, pB = 0; let totW = effW; let totH = effH;
@@ -199,9 +211,35 @@ app.registerExtension({
                     let scale = Math.min((cw - 10) / totW, (ch - 10) / totH);
                     let drawW = totW * scale; let drawH = totH * scale;
                     let dX = (cw - drawW) / 2; let dY = (ch - drawH) / 2;
+                    
+                    let innerImgX = dX + (pL * scale);
+                    let innerImgY = dY + (pT * scale);
+                    let innerImgW = effW * scale;
+                    let innerImgH = effH * scale;
+                    
+                    layoutContext = { imgX: innerImgX, imgY: innerImgY, imgW: innerImgW, imgH: innerImgH };
 
-                    ctx.fillStyle = state.padding_style === "Solid Green" ? "#00FF00" : "#000000";
-                    ctx.fillRect(dX, dY, drawW, drawH);
+                    // Recalculated Canvas Render pipeline style to dynamically inject noise particles
+                    if (state.padding_style === "Solid Green") {
+                        ctx.fillStyle = "#00FF00";
+                        ctx.fillRect(dX, dY, drawW, drawH);
+                    } else if (state.padding_style === "Latent Noise") {
+                        // Generates high-fidelity per-pixel custom grain loops inside the canvas element bounds
+                        ctx.fillStyle = "#000000";
+                        ctx.fillRect(dX, dY, drawW, drawH);
+                        let noiseImg = ctx.createImageData(Math.ceil(drawW), Math.ceil(drawH));
+                        for (let i = 0; i < noiseImg.data.length; i += 4) {
+                            let grain = Math.floor(Math.random() * 255);
+                            noiseImg.data[i] = grain;     // R
+                            noiseImg.data[i+1] = grain;   // G
+                            noiseImg.data[i+2] = grain;   // B
+                            noiseImg.data[i+3] = 255;     // Alpha
+                        }
+                        ctx.putImageData(noiseImg, dX, dY);
+                    } else {
+                        ctx.fillStyle = "#000000";
+                        ctx.fillRect(dX, dY, drawW, drawH);
+                    }
                     
                     ctx.save();
                     if (state.mode === "Exact Pixels") {
@@ -210,13 +248,36 @@ app.registerExtension({
                         if (rot === 90 || rot === 270) { ctx.drawImage(currentImg, -drawH/2, -drawW/2, drawH, drawW); }
                         else { ctx.drawImage(currentImg, -drawW/2, -drawH/2, drawW, drawH); }
                     } else {
-                        let imgX = dX + (pL * scale); let imgY = dY + (pT * scale);
-                        ctx.translate(imgX + (effW * scale)/2, imgY + (effH * scale)/2);
+                        ctx.translate(innerImgX + innerImgW/2, innerImgY + innerImgH/2);
                         ctx.rotate(rot * Math.PI / 180);
                         ctx.scale(state.flip_h ? -1 : 1, state.flip_v ? -1 : 1);
                         ctx.drawImage(currentImg, -(origW * scale)/2, -(origH * scale)/2, origW * scale, origH * scale);
                     }
                     ctx.restore();
+
+                    if (state.crop_enabled) {
+                        let bx = innerImgX + state.crop_left * innerImgW;
+                        let by = innerImgY + state.crop_top * innerImgH;
+                        let bw = (state.crop_right - state.crop_left) * innerImgW;
+                        let bh = (state.crop_bottom - state.crop_top) * innerImgH;
+
+                        ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
+                        ctx.fillRect(innerImgX, innerImgY, innerImgW, by - innerImgY);
+                        ctx.fillRect(innerImgX, by, bx - innerImgX, bh);
+                        ctx.fillRect(bx + bw, by, innerImgX + innerImgW - (bx + bw), bh);
+                        ctx.fillRect(innerImgX, by + bh, innerImgW, innerImgY + innerImgH - (by + bh));
+
+                        ctx.strokeStyle = "#3b82f6";
+                        ctx.lineWidth = 2;
+                        ctx.strokeRect(bx, by, bw, bh);
+
+                        ctx.fillStyle = "#ffffff";
+                        const hs = 6;
+                        ctx.fillRect(bx - hs/2, by - hs/2, hs, hs);
+                        ctx.fillRect(bx + bw - hs/2, by - hs/2, hs, hs);
+                        ctx.fillRect(bx - hs/2, by + bh - hs/2, hs, hs);
+                        ctx.fillRect(bx + bw - hs/2, by + bh - hs/2, hs, hs);
+                    }
                     
                     let finalW=Math.round(totW), finalH=Math.round(totH);
                     if (state.mode !== "Exact Pixels" && state.scaling_mode !== "No Scaling") {
@@ -226,6 +287,87 @@ app.registerExtension({
                     }
                     els.dims.textContent = `${finalW} x ${finalH} | ${state.mode === "Exact Pixels" ? "Exact Override" : (state.mode === "No Padding" ? "No Padding" : state.padding_style)}`;
                 };
+
+                els.canvas.addEventListener("mousedown", (e) => {
+                    const state = getState();
+                    if (e.button === 2) return; 
+                    if (!state.crop_enabled) return;
+
+                    const zoomScale = (app.canvas && app.canvas.ds) ? app.canvas.ds.scale : 1.0;
+                    const rect = els.canvas.getBoundingClientRect();
+                    const mx = (e.clientX - rect.left) / zoomScale;
+                    const my = (e.clientY - rect.top) / zoomScale;
+
+                    let bx = layoutContext.imgX + state.crop_left * layoutContext.imgW;
+                    let by = layoutContext.imgY + state.crop_top * layoutContext.imgH;
+                    let bw = (state.crop_right - state.crop_left) * layoutContext.imgW;
+                    let bh = (state.crop_bottom - state.crop_top) * layoutContext.imgH;
+                    
+                    const grabThresh = Math.max(12, 12 / zoomScale);
+
+                    if (Math.abs(mx - bx) < grabThresh && Math.abs(my - by) < grabThresh) activeHandle = "tl";
+                    else if (Math.abs(mx - (bx + bw)) < grabThresh && Math.abs(my - by) < grabThresh) activeHandle = "tr";
+                    else if (Math.abs(mx - bx) < grabThresh && Math.abs(my - (by + bh)) < grabThresh) activeHandle = "bl";
+                    else if (Math.abs(mx - (bx + bw)) < grabThresh && Math.abs(my - (by + bh)) < grabThresh) activeHandle = "br";
+                    else if (mx > bx && mx < bx + bw && my > by && my < by + bh) activeHandle = "center";
+                    else return;
+
+                    isDraggingCrop = true;
+                    lastMouseX = mx;
+                    lastMouseY = my;
+                    e.preventDefault();
+                });
+
+                window.addEventListener("mousemove", (e) => {
+                    if (!isDraggingCrop) return;
+                    const state = getState();
+                    const zoomScale = (app.canvas && app.canvas.ds) ? app.canvas.ds.scale : 1.0;
+                    const rect = els.canvas.getBoundingClientRect();
+                    const mx = (e.clientX - rect.left) / zoomScale;
+                    const my = (e.clientY - rect.top) / zoomScale;
+
+                    let deltaX = (mx - lastMouseX) / layoutContext.imgW;
+                    let deltaY = (my - lastMouseY) / layoutContext.imgH;
+
+                    let nl = state.crop_left, nt = state.crop_top, nr = state.crop_right, nb = state.crop_bottom;
+
+                    if (activeHandle === "center") {
+                        let w = nr - nl; let h = nb - nt;
+                        nl = Math.max(0, Math.min(1 - w, nl + deltaX));
+                        nt = Math.max(0, Math.min(1 - h, nt + deltaY));
+                        nr = nl + w; nb = nt + h;
+                    } else if (activeHandle === "tl") {
+                        nl = Math.max(0, Math.min(nr - 0.05, nl + deltaX));
+                        nt = Math.max(0, Math.min(nb - 0.05, nt + deltaY));
+                    } else if (activeHandle === "tr") {
+                        nr = Math.max(nl + 0.05, Math.min(1, nr + deltaX));
+                        nt = Math.max(0, Math.min(nb - 0.05, nt + deltaY));
+                    } else if (activeHandle === "bl") {
+                        nl = Math.max(0, Math.min(nr - 0.05, nl + deltaX));
+                        nb = Math.max(nt + 0.05, Math.min(1, nb + deltaY));
+                    } else if (activeHandle === "br") {
+                        nr = Math.max(nl + 0.05, Math.min(1, nr + deltaX));
+                        nb = Math.max(nt + 0.05, Math.min(1, nb + deltaY));
+                    }
+
+                    lastMouseX = mx; lastMouseY = my;
+                    setState({ crop_left: nl, crop_top: nt, crop_right: nr, crop_bottom: nb });
+                });
+
+                window.addEventListener("mouseup", () => {
+                    if (isDraggingCrop) {
+                        isDraggingCrop = false;
+                        activeHandle = null;
+                    }
+                });
+
+                root.addEventListener("contextmenu", (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (app.canvas && app.canvas.processContextMenu) {
+                        app.canvas.processContextMenu(node, e);
+                    }
+                });
 
                 const updateUI = () => {
                     const s = getState();
@@ -244,31 +386,46 @@ app.registerExtension({
                     els.flipV.style.background = s.flip_v ? "#3b82f6" : "";
                     els.invertMask.textContent = s.invert_mask ? "True" : "False";
                     els.invertMask.style.background = s.invert_mask ? "#3b82f6" : "";
+                    
+                    els.cropEnable.textContent = s.crop_enabled ? "Enabled" : "Disabled";
+                    els.cropEnable.style.background = s.crop_enabled ? "#3b82f6" : "";
                     renderCanvas();
                 };
 
-                els.mode.addEventListener("change", e => setState({mode: e.target.value}));
-                els.aspect.addEventListener("change", e => setState({target_aspect: e.target.value}));
-                els.align.addEventListener("change", e => setState({aspect_alignment: e.target.value}));
-                els.color.addEventListener("change", e => setState({padding_style: e.target.value}));
-                els.scaling.addEventListener("change", e => setState({scaling_mode: e.target.value}));
-                
-                els.mp.addEventListener("change", e => setState({scale_to_megapixel: e.target.value}));
-                els.padL.addEventListener("change", e => setState({manual_left: e.target.value}));
-                els.padT.addEventListener("change", e => setState({manual_top: e.target.value}));
-                els.padR.addEventListener("change", e => setState({manual_right: e.target.value}));
-                els.padB.addEventListener("change", e => setState({manual_bottom: e.target.value}));
-                els.exactW.addEventListener("change", e => setState({exact_width: e.target.value}));
-                els.exactH.addEventListener("change", e => setState({exact_height: e.target.value}));
-                els.maskGrow.addEventListener("change", e => setState({mask_grow: e.target.value}));
-                
-                els.flipH.addEventListener("click", () => setState({flip_h: !getState().flip_h}));
-                els.flipV.addEventListener("click", () => setState({flip_v: !getState().flip_v}));
-                els.invertMask.addEventListener("click", () => setState({invert_mask: !getState().invert_mask}));
-                els.rotL.addEventListener("click", () => { let r=getState().rotation; setState({rotation:(r-90+360)%360}); });
-                els.rotR.addEventListener("click", () => { let r=getState().rotation; setState({rotation:(r+90)%360}); });
+                els.cropEnable.addEventListener("click", (e) => { e.stopPropagation(); setState({ crop_enabled: !getState().crop_enabled }); });
 
-                // PERSISTENT FALLBACK: Instantly pull value data if normal loader metadata drops out on boot
+                els.mode.addEventListener("click", e => e.stopPropagation());
+                els.mode.addEventListener("change", e => setState({mode: e.target.value}));
+                els.aspect.addEventListener("click", e => e.stopPropagation());
+                els.aspect.addEventListener("change", e => setState({target_aspect: e.target.value}));
+                els.align.addEventListener("click", e => e.stopPropagation());
+                els.align.addEventListener("change", e => setState({aspect_alignment: e.target.value}));
+                els.color.addEventListener("click", e => e.stopPropagation());
+                els.color.addEventListener("change", e => setState({padding_style: e.target.value}));
+                els.scaling.addEventListener("click", e => e.stopPropagation());
+                els.scaling.addEventListener("change", e => setState({scaling_mode: e.target.value}));
+                els.mp.addEventListener("click", e => e.stopPropagation());
+                els.mp.addEventListener("change", e => setState({scale_to_megapixel: e.target.value}));
+                els.padL.addEventListener("click", e => e.stopPropagation());
+                els.padL.addEventListener("change", e => setState({manual_left: e.target.value}));
+                els.padT.addEventListener("click", e => e.stopPropagation());
+                els.padT.addEventListener("change", e => setState({manual_top: e.target.value}));
+                els.padR.addEventListener("click", e => e.stopPropagation());
+                els.padR.addEventListener("change", e => setState({manual_right: e.target.value}));
+                els.padB.addEventListener("click", e => e.stopPropagation());
+                els.padB.addEventListener("change", e => setState({manual_bottom: e.target.value}));
+                els.exactW.addEventListener("click", e => e.stopPropagation());
+                els.exactW.addEventListener("change", e => setState({exact_width: e.target.value}));
+                els.exactH.addEventListener("click", e => e.stopPropagation());
+                els.exactH.addEventListener("change", e => setState({exact_height: e.target.value}));
+                els.maskGrow.addEventListener("click", e => e.stopPropagation());
+                els.maskGrow.addEventListener("change", e => setState({mask_grow: e.target.value}));
+                els.flipH.addEventListener("click", (e) => { e.stopPropagation(); setState({flip_h: !getState().flip_h}); });
+                els.flipV.addEventListener("click", (e) => { e.stopPropagation(); setState({flip_v: !getState().flip_v}); });
+                els.invertMask.addEventListener("click", (e) => { e.stopPropagation(); setState({invert_mask: !getState().invert_mask}); });
+                els.rotL.addEventListener("click", (e) => { e.stopPropagation(); let r=getState().rotation; setState({rotation:(r-90+360)%360}); });
+                els.rotR.addEventListener("click", (e) => { e.stopPropagation(); let r=getState().rotation; setState({rotation:(r+90)%360}); });
+
                 const syncImageSource = () => {
                     if (nativeImageWidget && nativeImageWidget.value) {
                         if (currentImg.src !== `/view?filename=${encodeURIComponent(nativeImageWidget.value)}&type=input`) {
@@ -303,8 +460,35 @@ app.registerExtension({
                     } catch (err) { console.error("Upload failed", err); }
                 };
 
-                els.upload.addEventListener("click", () => els.fileInput.click());
+                els.upload.addEventListener("click", (e) => { e.stopPropagation(); els.fileInput.click(); });
                 els.fileInput.addEventListener("change", (e) => handleUpload(e.target.files[0]));
+
+                const handleGlobalPaste = (e) => {
+                    const isNodeTargeted = app.canvas && app.canvas.selected_nodes && app.canvas.selected_nodes[node.id];
+                    const isContainerFocused = document.activeElement === root || root.contains(document.activeElement);
+
+                    if (isNodeTargeted || isContainerFocused) {
+                        const items = (e.clipboardData || e.originalEvent.clipboardData).items;
+                        for (let i = 0; i < items.length; i++) {
+                            if (items[i].type.indexOf("image") === 0) {
+                                const file = items[i].getAsFile();
+                                handleUpload(file);
+                                e.preventDefault();
+                                e.stopPropagation(); 
+                                break;
+                            }
+                        }
+                    }
+                };
+
+                window.removeEventListener("paste", handleGlobalPaste, true);
+                window.addEventListener("paste", handleGlobalPaste, true);
+
+                root.addEventListener("click", (e) => {
+                    if(e.target === root || e.target.classList.contains("mps-row") || e.target.classList.contains("mps-label")) {
+                        root.focus();
+                    }
+                });
 
                 root.addEventListener("dragover", (e) => {
                     e.preventDefault(); e.stopPropagation();
@@ -323,12 +507,10 @@ app.registerExtension({
                     }
                 });
 
-                node.size = [310, 580];
-                node.addDOMWidget("modern_pad_ui", "custom", root, { getValue: () => null, setValue: () => {}, getMinHeight: () => 580 });
+                node.size = [310, 620]; 
+                node.addDOMWidget("modern_pad_ui", "custom", root, { getValue: () => null, setValue: () => {}, getMinHeight: () => 620 });
                 
-                // Continuous checker ensures canvas metrics kick back on if restored layout states race past DOM injections
                 setTimeout(() => { syncImageSource(); updateUI(); }, 250);
-                setTimeout(() => { syncImageSource(); updateUI(); }, 750);
                 return r;
             };
         }

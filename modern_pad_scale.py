@@ -20,7 +20,9 @@ DEFAULT_STATE = {
     "scaling_mode": "Megapixel Scaling",
     "scale_to_megapixel": 1.0,
     "manual_left": 0, "manual_top": 0, "manual_right": 0, "manual_bottom": 0,
-    "exact_width": 1024, "exact_height": 1024
+    "exact_width": 1024, "exact_height": 1024,
+    "crop_enabled": False,
+    "crop_left": 0.0, "crop_top": 0.0, "crop_right": 1.0, "crop_bottom": 1.0
 }
 
 class ModernPadAndScale:
@@ -35,7 +37,6 @@ class ModernPadAndScale:
         
         return {
             "required": {
-                # Eradicated {"image_upload": True} so ComfyUI stops injecting the native button
                 "image": (sorted(files), ),
                 "ModernState": ("STRING", {"default": json.dumps(DEFAULT_STATE)}),
             }
@@ -43,7 +44,6 @@ class ModernPadAndScale:
 
     @classmethod
     def VALIDATE_INPUTS(s, image, ModernState, **kwargs):
-        # Always bypass validation so it accepts any dynamically uploaded file from our custom dashboard
         return True
 
     @classmethod
@@ -76,6 +76,19 @@ class ModernPadAndScale:
             try: return float(val)
             except (ValueError, TypeError): return default
 
+        image_path = folder_paths.get_annotated_filepath(image)
+        img = Image.open(image_path)
+        img = ImageOps.exif_transpose(img) 
+
+        # Step 0: Interactive Crop Execution
+        if state.get("crop_enabled", False):
+            orig_w, orig_h = img.size
+            cl = max(0, min(orig_w - 1, int(safe_float(state.get("crop_left", 0.0)) * orig_w)))
+            ct = max(0, min(orig_h - 1, int(safe_float(state.get("crop_top", 0.0)) * orig_h)))
+            cr = max(cl + 1, min(orig_w, int(safe_float(state.get("crop_right", 1.0)) * orig_w)))
+            cb = max(ct + 1, min(orig_h, int(safe_float(state.get("crop_bottom", 1.0)) * orig_h)))
+            img = img.crop((cl, ct, cr, cb))
+        
         mode = state.get("mode", "Aspect Ratio")
         rotation = safe_int(state.get("rotation", 0))
         flip_h = state.get("flip_h", False)
@@ -94,10 +107,6 @@ class ModernPadAndScale:
         exact_height = max(8, safe_int(state.get("exact_height", 1024)))
         scale_to_megapixel = safe_float(state.get("scale_to_megapixel", 1.0))
 
-        image_path = folder_paths.get_annotated_filepath(image)
-        img = Image.open(image_path)
-        img = ImageOps.exif_transpose(img) 
-        
         if 'A' in img.getbands():
             alpha = img.getchannel('A')
             base_mask = ImageOps.invert(alpha)
@@ -150,10 +159,16 @@ class ModernPadAndScale:
                 else: pad_l = total_pad // 2; pad_r = total_pad - pad_l
 
         img_tensor = image_tensor.permute(0, 3, 1, 2)
+        
         if padding_style == "Solid Green":
             new_h, new_w = original_height + pad_t + pad_b, original_width + pad_l + pad_r
             padded_tensor = torch.zeros((img_tensor.shape[0], img_tensor.shape[1], new_h, new_w), dtype=img_tensor.dtype, device=img_tensor.device)
             padded_tensor[:, 1, :, :] = 1.0 
+            padded_tensor[:, :, pad_t:pad_t+original_height, pad_l:pad_l+original_width] = img_tensor
+        elif padding_style == "Latent Noise":
+            new_h, new_w = original_height + pad_t + pad_b, original_width + pad_l + pad_r
+            padded_tensor = torch.randn((img_tensor.shape[0], img_tensor.shape[1], new_h, new_w), dtype=img_tensor.dtype, device=img_tensor.device)
+            padded_tensor = (padded_tensor * 0.5 + 0.5).clamp(0.0, 1.0)
             padded_tensor[:, :, pad_t:pad_t+original_height, pad_l:pad_l+original_width] = img_tensor
         else: 
             padded_tensor = F.pad(img_tensor, (pad_l, pad_r, pad_t, pad_b), mode='constant', value=0.0)
